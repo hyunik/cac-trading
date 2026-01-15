@@ -12,6 +12,13 @@ import os
 from datetime import datetime, timedelta
 from typing import Dict, Any, Optional, List
 
+# .env 파일 로드
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass  # python-dotenv 미설치 시 환경변수만 사용
+
 from .data.binance_client import BinanceClient
 from .strategies.strategy_15m import Strategy15M
 from .strategies.strategy_1h import Strategy1H
