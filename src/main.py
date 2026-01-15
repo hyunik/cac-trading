@@ -120,8 +120,8 @@ class MultiSymbolTradingSystem:
             self.traders[symbol] = SymbolTrader(symbol)
             await self.traders[symbol].load_initial_data()
         
-        # 주간 리포트 스케줄러
-        asyncio.create_task(self._weekly_report_scheduler())
+        # 일일/주간 리포트 스케줄러
+        asyncio.create_task(self._report_scheduler())
         
         # 각 심볼의 캔들 구독 (병렬)
         tasks = []
@@ -309,18 +309,38 @@ class MultiSymbolTradingSystem:
                     timestamp=event.get('exit_time', datetime.now())
                 )
     
-    async def _weekly_report_scheduler(self) -> None:
-        """주간 리포트 스케줄러"""
+    async def _report_scheduler(self) -> None:
+        """일일 리포트(오전 9시) + 주간 리포트(일요일 21시) 스케줄러"""
+        last_daily_date = None
+        
         while self._running:
             now = datetime.now()
             
+            # 일일 리포트: 매일 오전 9시
+            if now.hour == 9 and now.minute < 1:
+                today = now.date()
+                if last_daily_date != today:
+                    logger.info("📋 일일 리포트 전송 중...")
+                    await self._send_daily_report()
+                    last_daily_date = today
+            
+            # 주간 리포트: 일요일 21시
             if now.weekday() == 6 and now.hour == 21:
                 if self._last_weekly_report is None or \
                    (now - self._last_weekly_report).days >= 6:
+                    logger.info("📊 주간 리포트 전송 중...")
                     await self._send_weekly_report()
                     self._last_weekly_report = now
             
             await asyncio.sleep(60)
+    
+    async def _send_daily_report(self) -> None:
+        """일일 리포트 전송 (매일 오전 9시)"""
+        if not self.discord:
+            return
+        
+        await self.discord.send_daily_report()
+        logger.info("일일 리포트 전송 완료")
     
     async def _send_weekly_report(self) -> None:
         """주간 리포트 전송"""

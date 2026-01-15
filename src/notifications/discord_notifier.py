@@ -1,7 +1,7 @@
 """
 Discord 알림 모듈
-- 실시간 매매 알림 (진입/익절/손절)
-- 주간 리포트 (매주 일요일)
+- 매일 오전 9시 일일 매매 리포트
+- 주간 리포트 (매주 일요일 21:00)
 - AI 전략 비교 분석 및 개선점 제안
 """
 
@@ -15,16 +15,14 @@ logger = logging.getLogger(__name__)
 
 
 class DiscordNotifier:
-    """Discord Webhook 기반 알림 시스템"""
+    """Discord Webhook 기반 알림 시스템 (일일/주간 리포트 전용)"""
     
     # 이모지 매핑
     EMOJI = {
-        'entry_long': '🟢',
-        'entry_short': '🔴',
-        'take_profit': '🟡',
-        'stop_loss': '🔴',
+        'daily_report': '📋',
         'weekly_report': '📊',
-        'warning': '⚠️',
+        'profit': '💰',
+        'loss': '📉',
         'success': '✅',
         'info': 'ℹ️'
     }
@@ -40,16 +38,7 @@ class DiscordNotifier:
         self._trade_log: List[Dict[str, Any]] = []
     
     async def send_message(self, content: str, embed: Optional[Dict] = None) -> bool:
-        """
-        Discord 메시지 전송
-        
-        Args:
-            content: 메시지 내용
-            embed: 임베드 메시지 (옵션)
-        
-        Returns:
-            전송 성공 여부
-        """
+        """Discord 메시지 전송"""
         payload = {"content": content}
         
         if embed:
@@ -71,7 +60,7 @@ class DiscordNotifier:
             logger.error(f"Discord send error: {e}")
             return False
     
-    async def notify_entry(
+    def log_entry(
         self,
         strategy_name: str,
         direction: str,
@@ -81,40 +70,22 @@ class DiscordNotifier:
         size_percent: float,
         signal_description: str,
         timestamp: datetime
-    ) -> bool:
-        """진입 알림"""
-        emoji = self.EMOJI['entry_long'] if direction == "LONG" else self.EMOJI['entry_short']
-        
-        embed = {
-            "title": f"{emoji} 진입 알림 | {strategy_name}",
-            "color": 0x00ff00 if direction == "LONG" else 0xff0000,
-            "fields": [
-                {"name": "심볼", "value": symbol, "inline": True},
-                {"name": "방향", "value": direction, "inline": True},
-                {"name": "비중", "value": f"{size_percent:.1f}%", "inline": True},
-                {"name": "진입가", "value": f"${entry_price:,.2f}", "inline": True},
-                {"name": "손절가", "value": f"${stop_loss:,.2f}", "inline": True},
-                {"name": "손절폭", "value": f"{abs(entry_price - stop_loss) / entry_price * 100:.2f}%", "inline": True},
-                {"name": "시그널", "value": signal_description, "inline": False}
-            ],
-            "timestamp": timestamp.isoformat(),
-            "footer": {"text": "CAC Trading System"}
-        }
-        
-        # 거래 로그 저장
+    ) -> None:
+        """진입 로그 저장 (알림 없음)"""
         self._trade_log.append({
             'type': 'ENTRY',
             'strategy': strategy_name,
             'direction': direction,
             'symbol': symbol,
-            'price': entry_price,
+            'entry_price': entry_price,
+            'stop_loss': stop_loss,
             'size_percent': size_percent,
+            'signal': signal_description,
             'timestamp': timestamp
         })
-        
-        return await self.send_message("", embed)
+        logger.info(f"[LOG] 진입: {symbol} {direction} @ {entry_price:,.4f}")
     
-    async def notify_take_profit(
+    def log_take_profit(
         self,
         strategy_name: str,
         direction: str,
@@ -125,24 +96,8 @@ class DiscordNotifier:
         exit_size_percent: float,
         stage: str,
         timestamp: datetime
-    ) -> bool:
-        """익절 알림"""
-        embed = {
-            "title": f"{self.EMOJI['take_profit']} 익절 알림 | {strategy_name}",
-            "color": 0xffd700,  # 골드
-            "fields": [
-                {"name": "심볼", "value": symbol, "inline": True},
-                {"name": "방향", "value": direction, "inline": True},
-                {"name": "단계", "value": stage, "inline": True},
-                {"name": "진입가", "value": f"${entry_price:,.2f}", "inline": True},
-                {"name": "청산가", "value": f"${exit_price:,.2f}", "inline": True},
-                {"name": "수익률", "value": f"+{pnl_percent:.2f}%", "inline": True},
-                {"name": "청산 물량", "value": f"{exit_size_percent:.0f}%", "inline": True}
-            ],
-            "timestamp": timestamp.isoformat(),
-            "footer": {"text": "CAC Trading System"}
-        }
-        
+    ) -> None:
+        """익절 로그 저장 (알림 없음)"""
         self._trade_log.append({
             'type': 'TAKE_PROFIT',
             'strategy': strategy_name,
@@ -152,12 +107,12 @@ class DiscordNotifier:
             'exit_price': exit_price,
             'pnl_percent': pnl_percent,
             'size_percent': exit_size_percent,
+            'stage': stage,
             'timestamp': timestamp
         })
-        
-        return await self.send_message("", embed)
+        logger.info(f"[LOG] 익절: {symbol} {pnl_percent:+.2f}%")
     
-    async def notify_stop_loss(
+    def log_stop_loss(
         self,
         strategy_name: str,
         direction: str,
@@ -167,23 +122,8 @@ class DiscordNotifier:
         pnl_percent: float,
         size_percent: float,
         timestamp: datetime
-    ) -> bool:
-        """손절 알림"""
-        embed = {
-            "title": f"{self.EMOJI['stop_loss']} 손절 알림 | {strategy_name}",
-            "color": 0xff0000,  # 빨강
-            "fields": [
-                {"name": "심볼", "value": symbol, "inline": True},
-                {"name": "방향", "value": direction, "inline": True},
-                {"name": "손실률", "value": f"{pnl_percent:.2f}%", "inline": True},
-                {"name": "진입가", "value": f"${entry_price:,.2f}", "inline": True},
-                {"name": "청산가", "value": f"${exit_price:,.2f}", "inline": True},
-                {"name": "청산 물량", "value": f"{size_percent:.0f}%", "inline": True}
-            ],
-            "timestamp": timestamp.isoformat(),
-            "footer": {"text": "CAC Trading System"}
-        }
-        
+    ) -> None:
+        """손절 로그 저장 (알림 없음)"""
         self._trade_log.append({
             'type': 'STOP_LOSS',
             'strategy': strategy_name,
@@ -195,8 +135,113 @@ class DiscordNotifier:
             'size_percent': size_percent,
             'timestamp': timestamp
         })
+        logger.info(f"[LOG] 손절: {symbol} {pnl_percent:.2f}%")
+    
+    # 기존 메서드들은 로그만 저장하도록 변경 (하위 호환성)
+    async def notify_entry(self, **kwargs) -> bool:
+        """진입 알림 (로그만 저장, Discord 알림 없음)"""
+        self.log_entry(**kwargs)
+        return True
+    
+    async def notify_take_profit(self, **kwargs) -> bool:
+        """익절 알림 (로그만 저장, Discord 알림 없음)"""
+        self.log_take_profit(**kwargs)
+        return True
+    
+    async def notify_stop_loss(self, **kwargs) -> bool:
+        """손절 알림 (로그만 저장, Discord 알림 없음)"""
+        self.log_stop_loss(**kwargs)
+        return True
+    
+    async def send_daily_report(self) -> bool:
+        """
+        일일 리포트 전송 (매일 오전 9시)
+        전일(어제) 00:00 ~ 23:59 거래 내역 요약
+        """
+        now = datetime.now()
+        yesterday_start = (now - timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
+        yesterday_end = yesterday_start.replace(hour=23, minute=59, second=59)
+        
+        # 전일 거래 필터링
+        daily_trades = [
+            t for t in self._trade_log
+            if yesterday_start <= t['timestamp'] <= yesterday_end
+        ]
+        
+        # 전략별 통계
+        stats_15m = self._calculate_strategy_stats(daily_trades, "15분봉 추세 피라미딩")
+        stats_1h = self._calculate_strategy_stats(daily_trades, "1시간봉 볼밴 역추세")
+        
+        # 심볼별 거래 요약
+        symbol_summary = self._get_symbol_summary(daily_trades)
+        
+        # 총 수익률
+        total_pnl = stats_15m['total_pnl'] + stats_1h['total_pnl']
+        total_trades = stats_15m['total_trades'] + stats_1h['total_trades']
+        
+        # 임베드 생성
+        embed = {
+            "title": f"{self.EMOJI['daily_report']} 일일 매매 리포트",
+            "description": f"📅 {yesterday_start.strftime('%Y-%m-%d')} (전일)",
+            "color": 0x2ecc71 if total_pnl >= 0 else 0xe74c3c,
+            "fields": [
+                # 요약
+                {"name": "📈 총 수익률", "value": f"**{total_pnl:+.2f}%**", "inline": True},
+                {"name": "🔢 총 거래", "value": f"{total_trades}건", "inline": True},
+                {"name": "\u200b", "value": "\u200b", "inline": True},
+                
+                # 전략 A
+                {"name": "━━ 15분봉 전략 ━━", "value": "\u200b", "inline": False},
+                {"name": "거래", "value": f"{stats_15m['total_trades']}건", "inline": True},
+                {"name": "승률", "value": f"{stats_15m['win_rate']:.0f}%", "inline": True},
+                {"name": "수익률", "value": f"{stats_15m['total_pnl']:+.2f}%", "inline": True},
+                
+                # 전략 B
+                {"name": "━━ 1시간봉 전략 ━━", "value": "\u200b", "inline": False},
+                {"name": "거래", "value": f"{stats_1h['total_trades']}건", "inline": True},
+                {"name": "승률", "value": f"{stats_1h['win_rate']:.0f}%", "inline": True},
+                {"name": "수익률", "value": f"{stats_1h['total_pnl']:+.2f}%", "inline": True},
+            ],
+            "footer": {"text": "CAC Trading System - Daily Report"},
+            "timestamp": now.isoformat()
+        }
+        
+        # 심볼별 요약 추가 (거래가 있는 경우)
+        if symbol_summary:
+            embed["fields"].append({
+                "name": "📊 코인별 거래",
+                "value": symbol_summary,
+                "inline": False
+            })
+        
+        if total_trades == 0:
+            embed["description"] += "\n\n_전일 거래 없음_"
         
         return await self.send_message("", embed)
+    
+    def _get_symbol_summary(self, trades: List[Dict[str, Any]]) -> str:
+        """심볼별 거래 요약 생성"""
+        exit_trades = [t for t in trades if t['type'] in ['TAKE_PROFIT', 'STOP_LOSS']]
+        
+        if not exit_trades:
+            return ""
+        
+        # 심볼별 집계
+        symbol_stats = {}
+        for trade in exit_trades:
+            symbol = trade['symbol']
+            if symbol not in symbol_stats:
+                symbol_stats[symbol] = {'trades': 0, 'pnl': 0.0}
+            symbol_stats[symbol]['trades'] += 1
+            symbol_stats[symbol]['pnl'] += trade.get('pnl_percent', 0) * trade.get('size_percent', 100) / 100
+        
+        # 문자열 생성
+        lines = []
+        for symbol, stats in sorted(symbol_stats.items(), key=lambda x: x[1]['pnl'], reverse=True):
+            emoji = "🟢" if stats['pnl'] >= 0 else "🔴"
+            lines.append(f"{emoji} {symbol}: {stats['trades']}건 ({stats['pnl']:+.2f}%)")
+        
+        return "\n".join(lines[:10])  # 최대 10개
     
     async def send_weekly_report(
         self,
@@ -205,11 +250,7 @@ class DiscordNotifier:
         week_start: datetime,
         week_end: datetime
     ) -> bool:
-        """
-        주간 리포트 전송 (매주 일요일 21:00)
-        
-        두 전략의 주간 성과를 비교하고 AI가 개선점 제안
-        """
+        """주간 리포트 전송 (매주 일요일 21:00)"""
         # 주간 거래 필터링
         week_trades = [
             t for t in self._trade_log
@@ -220,10 +261,12 @@ class DiscordNotifier:
         stats_15m = self._calculate_strategy_stats(week_trades, "15분봉 추세 피라미딩")
         stats_1h = self._calculate_strategy_stats(week_trades, "1시간봉 볼밴 역추세")
         
+        total_pnl = stats_15m['total_pnl'] + stats_1h['total_pnl']
+        
         # 비교 임베드 생성
         comparison_embed = {
             "title": f"{self.EMOJI['weekly_report']} 주간 매매 리포트",
-            "description": f"📅 {week_start.strftime('%Y-%m-%d')} ~ {week_end.strftime('%Y-%m-%d')}",
+            "description": f"📅 {week_start.strftime('%Y-%m-%d')} ~ {week_end.strftime('%Y-%m-%d')}\n\n**총 주간 수익률: {total_pnl:+.2f}%**",
             "color": 0x3498db,
             "fields": [
                 # 15분봉 전략
@@ -256,14 +299,11 @@ class DiscordNotifier:
             analysis_embed = {
                 "title": "🤖 AI 전략 분석 및 개선점",
                 "description": ai_analysis,
-                "color": 0x9b59b6,  # 보라색
+                "color": 0x9b59b6,
                 "footer": {"text": "Powered by LLM Analysis"}
             }
             
             await self.send_message("", analysis_embed)
-        
-        # 주간 로그 초기화 (옵션)
-        # self._trade_log = []
         
         return True
     
@@ -285,7 +325,6 @@ class DiscordNotifier:
                 'max_loss': 0.0
             }
         
-        # 수익/손실 거래 분리
         exit_trades = [t for t in strategy_trades if t['type'] in ['TAKE_PROFIT', 'STOP_LOSS']]
         wins = [t for t in exit_trades if t.get('pnl_percent', 0) > 0]
         losses = [t for t in exit_trades if t.get('pnl_percent', 0) <= 0]
@@ -293,7 +332,6 @@ class DiscordNotifier:
         total_trades = len(exit_trades)
         win_rate = len(wins) / total_trades * 100 if total_trades > 0 else 0
         
-        # 가중 평균 PnL (비중 고려)
         total_pnl = sum(
             t.get('pnl_percent', 0) * t.get('size_percent', 100) / 100 
             for t in exit_trades
@@ -318,7 +356,7 @@ class DiscordNotifier:
         stats_1h: Dict[str, Any],
         trades: List[Dict[str, Any]]
     ) -> str:
-        """LLM을 사용한 전략 분석 및 개선점 제안"""
+        """LLM을 사용한 전략 분석"""
         if not self.llm_client:
             return "LLM 클라이언트가 설정되지 않았습니다."
         
@@ -329,33 +367,29 @@ class DiscordNotifier:
 - 총 거래: {stats_15m['total_trades']}건
 - 승률: {stats_15m['win_rate']:.1f}%
 - 총 수익률: {stats_15m['total_pnl']:.2f}%
-- 평균 수익: {stats_15m['avg_win']:.2f}%
-- 평균 손실: {stats_15m['avg_loss']:.2f}%
-- 최대 손실: {stats_15m['max_loss']:.2f}%
 
 ## 전략 B: 1시간봉 볼린저밴드 역추세
 - 총 거래: {stats_1h['total_trades']}건
 - 승률: {stats_1h['win_rate']:.1f}%
 - 총 수익률: {stats_1h['total_pnl']:.2f}%
-- 평균 수익: {stats_1h['avg_win']:.2f}%
-- 평균 손실: {stats_1h['avg_loss']:.2f}%
-- 최대 손실: {stats_1h['max_loss']:.2f}%
 
-위 데이터를 분석하여:
-1. 어떤 전략이 더 효과적이었는지 평가
-2. 각 전략의 강점과 약점 분석
-3. 구체적인 개선 방안 3가지 제안
-
-간결하게 한국어로 답변해주세요 (300자 이내).
+간결하게 분석하고 개선점 3가지를 제안해주세요 (200자 이내).
 """
         
         try:
-            # LLM API 호출 (클라이언트 인터페이스에 따라 수정 필요)
             response = await self.llm_client.generate(prompt)
             return response
         except Exception as e:
             logger.error(f"AI analysis error: {e}")
             return f"AI 분석 생성 실패: {e}"
+    
+    def schedule_daily_report(self) -> datetime:
+        """다음 일일 리포트 시간 계산 (오전 9:00)"""
+        now = datetime.now()
+        next_report = now.replace(hour=9, minute=0, second=0, microsecond=0)
+        if now.hour >= 9:
+            next_report += timedelta(days=1)
+        return next_report
     
     def schedule_weekly_report(self) -> datetime:
         """다음 주간 리포트 시간 계산 (일요일 21:00)"""
@@ -383,6 +417,9 @@ class DiscordNotifierSync:
     
     def notify_stop_loss(self, **kwargs) -> bool:
         return asyncio.run(self._notifier.notify_stop_loss(**kwargs))
+    
+    def send_daily_report(self) -> bool:
+        return asyncio.run(self._notifier.send_daily_report())
     
     def send_weekly_report(self, **kwargs) -> bool:
         return asyncio.run(self._notifier.send_weekly_report(**kwargs))
