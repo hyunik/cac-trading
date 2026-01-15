@@ -1,0 +1,15 @@
+[Unit]
+Description=CAC Trading System
+After=network.target
+
+[Service]
+Type=simple
+User=YOUR_USERNAME
+WorkingDirectory=/home/YOUR_USERNAME/cac-trading
+Environment=PATH=/home/YOUR_USERNAME/cac-trading/venv/bin
+ExecStart=/home/YOUR_USERNAME/cac-trading/venv/bin/python -m src.main
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
