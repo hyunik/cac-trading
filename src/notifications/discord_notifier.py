@@ -60,6 +60,156 @@ class DiscordNotifier:
             logger.error(f"Discord send error: {e}")
             return False
     
+    async def send_image(self, image_path: str, content: str = "", embed: Optional[Dict] = None) -> bool:
+        """이미지와 함께 Discord 메시지 전송"""
+        try:
+            import os
+            if not os.path.exists(image_path):
+                logger.error(f"이미지 파일 없음: {image_path}")
+                return False
+            
+            data = aiohttp.FormData()
+            data.add_field('file', open(image_path, 'rb'), 
+                          filename=os.path.basename(image_path))
+            
+            payload = {"content": content}
+            if embed:
+                import json
+                payload["payload_json"] = json.dumps({"embeds": [embed]})
+            
+            async with aiohttp.ClientSession() as session:
+                async with session.post(self.webhook_url, data=data) as response:
+                    if response.status in [200, 204]:
+                        logger.info(f"이미지 전송 성공: {image_path}")
+                        return True
+                    else:
+                        error = await response.text()
+                        logger.error(f"Discord 이미지 전송 오류: {response.status} - {error}")
+                        return False
+        except Exception as e:
+            logger.error(f"이미지 전송 오류: {e}")
+            return False
+    
+    async def send_cac_analysis(
+        self, 
+        symbol: str, 
+        chart_path: str, 
+        analysis_text: str,
+        trend: str = "NEUTRAL",
+        signal: str = "HOLD"
+    ) -> bool:
+        """
+        CAC 분석 리포트 전송 (차트 이미지 + 분석)
+        
+        Args:
+            symbol: 코인 심볼
+            chart_path: 차트 이미지 경로
+            analysis_text: LLM 분석 텍스트
+            trend: 추세 (BULLISH/BEARISH/NEUTRAL)
+            signal: 신호 (BUY/SELL/HOLD)
+        """
+        # 색상 결정
+        if trend == "BULLISH":
+            color = 0x26a69a
+            trend_emoji = "📈"
+        elif trend == "BEARISH":
+            color = 0xef5350
+            trend_emoji = "📉"
+        else:
+            color = 0x9e9e9e
+            trend_emoji = "➡️"
+        
+        # 신호 이모지
+        signal_map = {"BUY": "🟢 매수", "SELL": "🔴 매도", "HOLD": "⚪ 관망"}
+        signal_text = signal_map.get(signal, "⚪ 관망")
+        
+        embed = {
+            "title": f"{trend_emoji} {symbol} CAC 분석",
+            "description": analysis_text[:2000],  # Discord 제한
+            "color": color,
+            "fields": [
+                {"name": "추세", "value": trend, "inline": True},
+                {"name": "신호", "value": signal_text, "inline": True}
+            ],
+            "footer": {"text": "CAC Trading System - Daily Analysis"},
+            "timestamp": datetime.now().isoformat()
+        }
+        
+        # 이미지와 함께 전송
+        return await self.send_image(chart_path, "", embed)
+    
+    async def send_daily_cac_report(
+        self, 
+        analyses: list,
+        chart_paths: Dict[str, str]
+    ) -> bool:
+        """
+        전체 코인 일일 CAC 분석 리포트 전송
+        
+        Args:
+            analyses: CACAnalysisResult 리스트
+            chart_paths: {symbol: chart_path} 딕셔너리
+        """
+        # 요약 먼저 전송
+        now = datetime.now()
+        summary_embed = {
+            "title": "📈 일일 CAC 분석 리포트",
+            "description": f"📅 {now.strftime('%Y-%m-%d %H:%M')} 기준",
+            "color": 0x2196f3,
+            "fields": [],
+            "footer": {"text": f"총 {len(analyses)}개 코인 분석"}
+        }
+        
+        # 각 코인 요약
+        buy_coins = []
+        sell_coins = []
+        hold_coins = []
+        
+        for analysis in analyses:
+            if analysis.signal == 'BUY':
+                buy_coins.append(analysis.symbol)
+            elif analysis.signal == 'SELL':
+                sell_coins.append(analysis.symbol)
+            else:
+                hold_coins.append(analysis.symbol)
+        
+        if buy_coins:
+            summary_embed["fields"].append({
+                "name": "🟢 매수 신호",
+                "value": ", ".join(buy_coins),
+                "inline": False
+            })
+        if sell_coins:
+            summary_embed["fields"].append({
+                "name": "🔴 매도 신호", 
+                "value": ", ".join(sell_coins),
+                "inline": False
+            })
+        if hold_coins:
+            summary_embed["fields"].append({
+                "name": "⚪ 관망",
+                "value": ", ".join(hold_coins),
+                "inline": False
+            })
+        
+        await self.send_message("", summary_embed)
+        
+        # 각 코인별 상세 분석 전송 (매수/매도 신호만)
+        for analysis in analyses:
+            if analysis.signal in ['BUY', 'SELL']:
+                chart_path = chart_paths.get(analysis.symbol)
+                if chart_path:
+                    await self.send_cac_analysis(
+                        symbol=analysis.symbol,
+                        chart_path=chart_path,
+                        analysis_text=analysis.analysis,
+                        trend=analysis.trend,
+                        signal=analysis.signal
+                    )
+                    await asyncio.sleep(1)  # 레이트 리밋 방지
+        
+        return True
+    
     def log_entry(
         self,
         strategy_name: str,

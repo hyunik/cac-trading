@@ -310,18 +310,23 @@ class MultiSymbolTradingSystem:
                 )
     
     async def _report_scheduler(self) -> None:
-        """일일 리포트(오전 9시) + 주간 리포트(일요일 21시) 스케줄러"""
+        """일일 리포트(오전 9시) + CAC 분석 + 주간 리포트(일요일 21시) 스케줄러"""
         last_daily_date = None
         
         while self._running:
             now = datetime.now()
             
-            # 일일 리포트: 매일 오전 9시
+            # 일일 리포트 + CAC 분석: 매일 오전 9시
             if now.hour == 9 and now.minute < 1:
                 today = now.date()
                 if last_daily_date != today:
                     logger.info("📋 일일 리포트 전송 중...")
                     await self._send_daily_report()
+                    
+                    # CAC 분석 리포트 전송
+                    logger.info("📈 CAC 분석 리포트 생성 중...")
+                    await self._send_cac_analysis_report()
+                    
                     last_daily_date = today
             
             # 주간 리포트: 일요일 21시
@@ -370,6 +375,84 @@ class MultiSymbolTradingSystem:
         )
         
         logger.info("주간 리포트 전송 완료")
+    
+    async def _send_cac_analysis_report(self) -> None:
+        """CAC 분석 리포트 전송 (매일 오전 9시)"""
+        if not self.discord:
+            return
+        
+        try:
+            # 지연 임포트 (matplotlib 등 무거운 모듈)
+            from .analysis.chart_generator import ChartGenerator
+            from .analysis.llm_analyzer import LLMAnalyzer
+            from .analysis.signal_detector import SignalDetector
+            from .analysis.bollinger_bands import BollingerBands
+            
+            chart_gen = ChartGenerator()
+            llm_analyzer = LLMAnalyzer(provider="openai")
+            signal_detector = SignalDetector()
+            bb_analyzer = BollingerBands()
+            
+            analyses = []
+            chart_paths = {}
+            
+            for symbol, trader in self.traders.items():
+                logger.info(f"[{symbol}] CAC 분석 중...")
+                
+                # 일봉/주봉 데이터 가져오기 (주봉은 일봉에서 resample)
+                df_daily = await trader.binance.get_klines('1d', limit=60)
+                df_weekly = await trader.binance.get_klines('1w', limit=20)
+                
+                if df_daily.empty:
+                    continue
+                
+                # 시그널 감지
+                signals_daily = signal_detector.detect_all_signals(df_daily)
+                signals_weekly = signal_detector.detect_all_signals(df_weekly) if not df_weekly.empty else []
+                
+                # 볼린저밴드 분석
+                bb_daily = bb_analyzer.get_current_band(df_daily)
+                bb_weekly = bb_analyzer.get_current_band(df_weekly) if not df_weekly.empty else None
+                
+                # 차트 생성
+                chart_path = chart_gen.generate_chart(
+                    df=df_daily.tail(30),
+                    symbol=symbol,
+                    timeframe='1d',
+                    signals=[{'date': s.timestamp, 'type': 'buy' if 'BULLISH' in s.signal_type.value.upper() else 'sell'} 
+                             for s in signals_daily[-5:]] if signals_daily else None,
+                    show_bb=True,
+                    show_ma=True,
+                    title=f"{symbol} Daily Chart"
+                )
+                
+                if chart_path:
+                    chart_paths[symbol] = chart_path
+                
+                # LLM 분석
+                analysis = await llm_analyzer.analyze_coin(
+                    symbol=symbol,
+                    df_daily=df_daily,
+                    df_weekly=df_weekly,
+                    signals_daily=[{'type': s.signal_type.value, 'confidence': s.confidence.value} for s in signals_daily] if signals_daily else None,
+                    signals_weekly=[{'type': s.signal_type.value, 'confidence': s.confidence.value} for s in signals_weekly] if signals_weekly else None,
+                    bb_data_daily={'position': bb_daily.position.value if bb_daily else 'N/A'},
+                    bb_data_weekly={'position': bb_weekly.position.value if bb_weekly else 'N/A'}
+                )
+                analyses.append(analysis)
+                
+                logger.info(f"[{symbol}] 분석 완료: {analysis.signal}")
+            
+            # Discord로 전송
+            await self.discord.send_daily_cac_report(analyses, chart_paths)
+            
+            # 차트 파일 정리
+            chart_gen.cleanup_old_charts(max_age_hours=24)
+            
+            logger.info("CAC 분석 리포트 전송 완료")
+            
+        except Exception as e:
+            logger.error(f"CAC 분석 리포트 오류: {e}")
     
     def get_status(self) -> Dict[str, Any]:
         """시스템 상태"""
