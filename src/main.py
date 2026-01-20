@@ -377,74 +377,96 @@ class MultiSymbolTradingSystem:
         logger.info("주간 리포트 전송 완료")
     
     async def _send_cac_analysis_report(self) -> None:
-        """CAC 분석 리포트 전송 (매일 오전 9시)"""
+        """CAC 분석 리포트 전송 (매일 오전 9시)
+        
+        1단계: 시장 전체 분석 (BTC 기준, BTC 유사 알트코인 분석)
+        2단계: 주요 코인별 개별 분석 (매수/매도 신호만)
+        """
         if not self.discord:
             return
         
         try:
-            # 지연 임포트 (matplotlib 등 무거운 모듈)
             from .analysis.chart_generator import ChartGenerator
             from .analysis.llm_analyzer import LLMAnalyzer
-            from .analysis.signal_detector import SignalDetector
-            from .analysis.bollinger_bands import BollingerBands
             
             chart_gen = ChartGenerator()
             llm_analyzer = LLMAnalyzer(provider="openai")
-            signal_detector = SignalDetector()
-            bb_analyzer = BollingerBands()
             
-            analyses = []
+            # 전체 코인 데이터 수집
+            all_coins_data = {}
             chart_paths = {}
             
             for symbol, trader in self.traders.items():
-                logger.info(f"[{symbol}] CAC 분석 중...")
+                logger.info(f"[{symbol}] 데이터 수집 중...")
                 
-                # 일봉/주봉 데이터 가져오기 (주봉은 일봉에서 resample)
                 df_daily = await trader.binance.get_klines('1d', limit=60)
                 df_weekly = await trader.binance.get_klines('1w', limit=20)
                 
                 if df_daily.empty:
                     continue
                 
-                # 시그널 감지
-                signals_daily = signal_detector.detect_all_signals(df_daily)
-                signals_weekly = signal_detector.detect_all_signals(df_weekly) if not df_weekly.empty else []
+                all_coins_data[symbol] = {
+                    'daily': df_daily,
+                    'weekly': df_weekly
+                }
                 
-                # 볼린저밴드 분석
-                bb_daily = bb_analyzer.get_current_band(df_daily)
-                bb_weekly = bb_analyzer.get_current_band(df_weekly) if not df_weekly.empty else None
-                
-                # 차트 생성
-                chart_path = chart_gen.generate_chart(
-                    df=df_daily.tail(30),
-                    symbol=symbol,
-                    timeframe='1d',
-                    signals=[{'date': s.timestamp, 'type': 'buy' if 'BULLISH' in s.signal_type.value.upper() else 'sell'} 
-                             for s in signals_daily[-5:]] if signals_daily else None,
-                    show_bb=True,
-                    show_ma=True,
-                    title=f"{symbol} Daily Chart"
-                )
-                
-                if chart_path:
-                    chart_paths[symbol] = chart_path
-                
-                # LLM 분석
-                analysis = await llm_analyzer.analyze_coin(
-                    symbol=symbol,
-                    df_daily=df_daily,
-                    df_weekly=df_weekly,
-                    signals_daily=[{'type': s.signal_type.value, 'confidence': s.confidence.value} for s in signals_daily] if signals_daily else None,
-                    signals_weekly=[{'type': s.signal_type.value, 'confidence': s.confidence.value} for s in signals_weekly] if signals_weekly else None,
-                    bb_data_daily={'position': bb_daily.position.value if bb_daily else 'N/A'},
-                    bb_data_weekly={'position': bb_weekly.position.value if bb_weekly else 'N/A'}
-                )
-                analyses.append(analysis)
-                
-                logger.info(f"[{symbol}] 분석 완료: {analysis.signal}")
+                # BTC 차트만 생성 (시장 전체 분석용)
+                if symbol == 'BTCUSDT':
+                    chart_path = chart_gen.generate_chart(
+                        df=df_daily.tail(30),
+                        symbol=symbol,
+                        timeframe='1d',
+                        show_bb=True,
+                        show_ma=True,
+                        title="BTC Daily Chart (시장 분석 기준)"
+                    )
+                    if chart_path:
+                        chart_paths['BTCUSDT'] = chart_path
             
-            # Discord로 전송
-            await self.discord.send_daily_cac_report(analyses, chart_paths)
+            # 1단계: 시장 전체 분석 (BTC 기준)
+            logger.info("📊 시장 전체 분석 중...")
+            market_overview = await llm_analyzer.analyze_market_overview(all_coins_data)
+            
+            # 시장 전체 분석 Discord 전송
+            market_embed = {
+                "title": "📈 일일 시장 분석 리포트",
+                "description": f"📅 {datetime.now().strftime('%Y-%m-%d %H:%M')} 기준\n\n{market_overview.analysis}",
+                "color": 0x26a69a if 'LONG' in market_overview.btc_trend else 0xef5350 if 'SHORT' in market_overview.btc_trend else 0x9e9e9e,
+                "fields": [
+                    {"name": "🔥 BTC 추세", "value": market_overview.btc_trend, "inline": True},
+                    {"name": "📊 시장 국면", "value": market_overview.market_phase, "inline": True},
+                    {"name": "🔗 BTC 유사 알트", "value": ", ".join(market_overview.btc_similar_coins) or "N/A", "inline": False}
+                ],
+                "footer": {"text": "CAC Trading System - 캔들·거래량 분석"},
+                "timestamp": datetime.now().isoformat()
+            }
+            
+            # BTC 차트 포함 전송
+            if chart_paths.get('BTCUSDT'):
+                await self.discord.send_image(chart_paths['BTCUSDT'], "", market_embed)
+            else:
+                await self.discord.send_message("", market_embed)
+            
+            # 2단계: 주요 코인별 분석 (5개만 - BTC 유사 + 강한 신호)
+            logger.info("📋 개별 코인 분석 중...")
+            analyses = await llm_analyzer.analyze_all_coins(all_coins_data)
+            
+            # 매수/매도 신호 코인만 필터링 (최대 5개)
+            signal_coins = [a for a in analyses if a.signal in ['BUY', 'SELL']][:5]
+            
+            if signal_coins:
+                summary_text = "**주요 시그널 코인:**\n"
+                for a in signal_coins:
+                    emoji = "🟢" if a.signal == 'BUY' else "🔴"
+                    summary_text += f"{emoji} {a.symbol}: {a.analysis[:100]}...\n\n"
+                
+                signal_embed = {
+                    "title": "🎯 코인별 신호",
+                    "description": summary_text,
+                    "color": 0x2196f3,
+                    "footer": {"text": f"총 {len(signal_coins)}개 코인 시그널"}
+                }
+                await self.discord.send_message("", signal_embed)
             
             # 차트 파일 정리
             chart_gen.cleanup_old_charts(max_age_hours=24)
@@ -453,6 +475,8 @@ class MultiSymbolTradingSystem:
             
         except Exception as e:
             logger.error(f"CAC 분석 리포트 오류: {e}")
+            import traceback
+            traceback.print_exc()
     
     def get_status(self) -> Dict[str, Any]:
         """시스템 상태"""
